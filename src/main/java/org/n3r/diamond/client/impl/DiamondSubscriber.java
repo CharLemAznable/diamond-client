@@ -38,6 +38,8 @@ public class DiamondSubscriber implements Closeable {
     private volatile DiamondManagerConf managerConfig = new DiamondManagerConf();
 
     private ScheduledExecutorService scheduler;
+    private volatile boolean scheduling;
+
     private LocalDiamondMiner localDiamondMiner = new LocalDiamondMiner();
     private ServerAddressesMiner serverAddressesMiner;
     private SnapshotMiner snapshotMiner;
@@ -46,6 +48,8 @@ public class DiamondSubscriber implements Closeable {
     private volatile boolean running;
 
     private DiamondRemoteChecker diamondRemoteChecker;
+
+    private DiamondHttpClient diamondHttpClient;
 
     private DiamondSubscriber() {
     }
@@ -68,17 +72,20 @@ public class DiamondSubscriber implements Closeable {
 
         localDiamondMiner.start(managerConfig);
 
-        snapshotMiner = new SnapshotMiner(managerConfig);
-        diamondCache = new DiamondCache(snapshotMiner);
+        if (null == snapshotMiner) snapshotMiner = new SnapshotMiner(managerConfig);
+        if (null == diamondCache) diamondCache = new DiamondCache(snapshotMiner);
 
         if (!ClientProperties.isPureLocalMode() || MockDiamondServer.isTestMode()) {
-            DiamondHttpClient diamondHttpClient = new DiamondHttpClient(managerConfig);
+            if (null == diamondHttpClient) diamondHttpClient = new DiamondHttpClient(managerConfig);
 
-            serverAddressesMiner = new ServerAddressesMiner(managerConfig, scheduler, diamondHttpClient);
-            serverAddressesMiner.start();
+            if (null == serverAddressesMiner) {
+                serverAddressesMiner = new ServerAddressesMiner(managerConfig, scheduler, diamondHttpClient);
+                serverAddressesMiner.start();
+            }
 
-            diamondRemoteChecker = new DiamondRemoteChecker(this,
-                    managerConfig, diamondCache, diamondHttpClient);
+            if (null == diamondRemoteChecker)
+                diamondRemoteChecker = new DiamondRemoteChecker(this,
+                        managerConfig, diamondCache, diamondHttpClient);
 
             log().info("diamond servers {}", managerConfig.getDiamondServers());
 
@@ -95,7 +102,10 @@ public class DiamondSubscriber implements Closeable {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> close()));
     }
 
-    private void rotateCheckDiamonds() {
+    private synchronized void rotateCheckDiamonds() {
+        if (scheduling) return;
+        scheduling = true;
+
         int pollingInterval = managerConfig.getPollingInterval();
         scheduler.schedule(() -> new DiamondExtenderManager().loadDiamondExtenders(), 5, TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(() -> rotateCheckDiamondsTask(), pollingInterval, pollingInterval, TimeUnit.SECONDS);
@@ -123,6 +133,7 @@ public class DiamondSubscriber implements Closeable {
         if (serverAddressesMiner != null) serverAddressesMiner.stop();
 
         scheduler.shutdownNow();
+        scheduling = false;
 
 //        metaCache.invalidateAll();
         if (diamondRemoteChecker != null) diamondRemoteChecker.shutdown();
